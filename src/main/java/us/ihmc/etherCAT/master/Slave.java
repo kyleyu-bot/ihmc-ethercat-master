@@ -81,6 +81,10 @@ public class Slave
    private int[] lostLinkCounter = new int[4];
    private int ethercatProcessingUnitErrorCounter = -1;
    private int pdiErrorCounter = -1;
+   private volatile boolean holdInPreOp = false;
+   private volatile boolean requestPreOp = false;
+   private volatile boolean preOpRequested = false;
+   private volatile boolean preOpDemoting = false;
    
    /**
     * Create a new slave and set the address 
@@ -950,6 +954,7 @@ public class Slave
          {
             master.getEtherCATStatusCallback().notifyStateChange(this, previousState, this.houseHolderState, this.houseHolderAlStatusCode);
          }
+         // requestAndHoldPreOp(requestPreOp);
          return true;
       }
       else
@@ -1028,7 +1033,13 @@ public class Slave
          
          break;
       case PRE_OP:
-         
+         if (holdInPreOp)
+         {
+            // do nothing: intentionally hold PRE-OP so mailbox SDO writes are allowed
+            dcClockStable = false;
+            dcOffsetSamples = 0;
+            break;
+         }
          if(!dcEnabled)
          {
             master.getEtherCATStatusCallback().trace(this, TRACE_EVENT.RECONFIG_TO_SAFEOP);
@@ -1044,6 +1055,13 @@ public class Slave
       case PRE_OPERR:
          break;
       case SAFE_OP:
+         if (holdInPreOp)
+         {
+            // do nothing: intentionally hold PRE-OP so mailbox SDO writes are allowed
+            dcClockStable = false;
+            dcOffsetSamples = 0;
+            break;
+         }
          if(dcEnabled && !dcClockStable)
          {
             int dcOffset = getDCSyncOffset();
@@ -1290,4 +1308,63 @@ public class Slave
       return pdiErrorCounter;
    }
 
+   public void setRequestPreOp(boolean setRequestPreOpInput)
+   {
+      requestPreOp = setRequestPreOpInput;
+   }
+   
+   public void requestAndHoldPreOp(boolean requestAndHoldPreOpInput)
+   {
+      if(requestAndHoldPreOpInput)
+      {
+         if (ec_slave == null) throw new IllegalStateException("Slave not configured");
+         holdInPreOp = true;
+         // Step down OP -> SAFE-OP first (often safer for drives)
+         if ( (this.houseHolderState != State.SAFE_OP) && (this.houseHolderState != State.PRE_OP))
+         {
+            // ec_slave.setState(ec_state.EC_STATE_SAFE_OP.swigValue());
+            // soem.ecx_writestate(context, slaveIndex);
+            soem.ecx_reconfig_slave_to_safeop(context, slaveIndex, soemConstants.EC_TIMEOUTRET3);
+            soem.ecx_statecheck(context, slaveIndex, ec_state.EC_STATE_SAFE_OP.swigValue(), soemConstants.EC_TIMEOUTSTATE);
+            if(!preOpRequested)
+            {
+               System.out.println("commanding safe op");
+            }
+         }
+         else if (this.houseHolderState == State.SAFE_OP) 
+         {
+             // Then SAFE-OP -> PRE-OP
+            ec_slave.setState(ec_state.EC_STATE_PRE_OP.swigValue());
+            soem.ecx_writestate(context, slaveIndex);
+            if(!preOpDemoting)
+            {
+               System.out.println("in safeop, commanding preop");
+               preOpDemoting = true;
+            } 
+         }
+         else if (this.houseHolderState == State.PRE_OP) 
+         {
+            //do nothing, already in PRE_OP
+         }
+         if(!preOpRequested)
+         {
+            System.out.println("PreOp requested slave layer");
+            System.out.println(this.houseHolderState);
+            System.out.println(state);
+            preOpRequested = true;
+         }
+         
+      }
+      else
+      {
+         holdInPreOp = false;
+         preOpRequested = false;
+         preOpDemoting = false;
+      }
+   }
+
+   public boolean returnRequestFlag()
+   {
+      return requestPreOp;
+   } 
 }
