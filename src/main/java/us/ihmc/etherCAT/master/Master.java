@@ -418,11 +418,40 @@ public class Master implements MasterInterface
       }      
 
       
-      currentState = soem.ecx_statecheck(context, 0, ec_state.EC_STATE_SAFE_OP.swigValue(), soemConstants.EC_TIMEOUTSTATE);
+      // Pump process data while waiting for SAFE-OP. Slaves with a SyncManager PDO watchdog
+      // (e.g. Novanta Capitan, emergency 0xFF43 "Cyclic timeout - EtherCAT PDO lifeguard")
+      // start their watchdog the moment SM2 is configured by ecx_config_map_group, and fault
+      // unless they see RxPDO frames inside the watchdog window.
+      final long safeOpDeadlineNs = System.nanoTime() + 2_000_000_000L;
+      currentState = soem.ecx_statecheck(context, 0, ec_state.EC_STATE_SAFE_OP.swigValue(), 0);
+      while (currentState != ec_state.EC_STATE_SAFE_OP.swigValue() && System.nanoTime() < safeOpDeadlineNs)
+      {
+         soem.ecx_send_processdata(context);
+         soem.ecx_receive_processdata(context, soemConstants.EC_TIMEOUTRET);
+         currentState = soem.ecx_statecheck(context, 0, ec_state.EC_STATE_SAFE_OP.swigValue(), 50_000);
+      }
+
       if (currentState != ec_state.EC_STATE_SAFE_OP.swigValue())
       {
-         throw new IOException("Did not transfer to SAFEOP. Current State: " + ec_state.swigToEnum(currentState));
-      }      
+         soem.ecx_readstate(context);
+         StringBuilder details = new StringBuilder();
+         details.append("Did not transfer to SAFEOP. Aggregate state: 0x").append(Integer.toHexString(currentState));
+         for (int i = 0; i < slavecount; i++)
+         {
+            ec_slavet diag = soem.ecx_slave(context, i + 1);
+            int slaveState = diag.getState();
+            int alStatus = diag.getALstatuscode();
+            details.append(String.format("%n  slave %d alias=%d pos=%d name=%s state=0x%02X AL=0x%04X (%s)",
+                                         i + 1,
+                                         diag.getAliasadr(),
+                                         i,
+                                         diag.getName(),
+                                         slaveState,
+                                         alStatus,
+                                         soem.ec_ALstatuscode2string(alStatus)));
+         }
+         throw new IOException(details.toString());
+      }
        
       getEtherCATStatusCallback().trace(TRACE_EVENT.LINK_BUFFERS);
       
